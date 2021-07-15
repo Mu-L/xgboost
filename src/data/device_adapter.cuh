@@ -124,7 +124,6 @@ class CudfAdapter : public detail::SingleBatchDataIter<CudfAdapterBatch> {
 
     auto const& typestr = get<String const>(json_columns[0]["typestr"]);
     CHECK_EQ(typestr.size(), 3) << ArrayInterfaceErrors::TypestrFormat();
-    CHECK_NE(typestr.front(), '>') << ArrayInterfaceErrors::BigEndian();
     std::vector<ArrayInterface> columns;
     auto first_column = ArrayInterface(get<Object const>(json_columns[0]));
     num_rows_ = first_column.num_rows;
@@ -217,7 +216,7 @@ size_t GetRowCounts(const AdapterBatchT batch, common::Span<size_t> offset,
                     int device_idx, float missing) {
   IsValidFunctor is_valid(missing);
   // Count elements per row
-  dh::LaunchN(device_idx, batch.Size(), [=] __device__(size_t idx) {
+  dh::LaunchN(batch.Size(), [=] __device__(size_t idx) {
     auto element = batch.GetElement(idx);
     if (is_valid(element)) {
       atomicAdd(reinterpret_cast<unsigned long long*>(  // NOLINT
