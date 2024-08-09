@@ -9,6 +9,7 @@
 #include <atomic>     // for atomic
 #include <cstdint>    // for uint64_t
 #include <future>     // for future
+#include <map>        // for map
 #include <memory>     // for unique_ptr
 #include <mutex>      // for mutex
 #include <string>     // for string
@@ -79,6 +80,40 @@ struct Cache {
    */
   void Commit();
 };
+
+inline void DeleteCacheFiles(std::map<std::string, std::shared_ptr<Cache>> const& cache_info) {
+  for (auto const& kv : cache_info) {
+    CHECK(kv.second);
+    auto n = kv.second->ShardName();
+    if (kv.second->OnHost()) {
+      continue;
+    }
+    TryDeleteCacheFile(n);
+  }
+}
+
+[[nodiscard]] inline std::string MakeId(std::string prefix, void const* ptr) {
+  std::stringstream ss;
+  ss << ptr;
+  return prefix + "-" + ss.str();
+}
+
+/**
+ * @brief Make cache if it doesn't exist yet.
+ */
+[[nodiscard]] inline std::string MakeCache(void const* ptr, std::string format, bool on_host,
+                                           std::string prefix,
+                                           std::map<std::string, std::shared_ptr<Cache>>* out) {
+  auto& cache_info = *out;
+  auto name = MakeId(prefix, ptr);
+  auto id = name + format;
+  auto it = cache_info.find(id);
+  if (it == cache_info.cend()) {
+    cache_info[id].reset(new Cache{false, name, format, on_host});
+    LOG(INFO) << "Make cache:" << cache_info[id]->ShardName();
+  }
+  return id;
+}
 
 // Prevents multi-threaded call to `GetBatches`.
 class TryLockGuard {
@@ -226,7 +261,7 @@ class SparsePageSourceImpl : public BatchIteratorImpl<S>, public FormatStreamPol
     }
     // An heuristic for number of pre-fetched batches.  We can make it part of BatchParam
     // to let user adjust number of pre-fetched batches when needed.
-    std::int32_t kPrefetches = 3;
+    std::int32_t constexpr kPrefetches = 3;
     std::int32_t n_prefetches = std::min(nthreads_, kPrefetches);
     n_prefetches = std::max(n_prefetches, 1);
     std::int32_t n_prefetch_batches = std::min(static_cast<bst_idx_t>(n_prefetches), n_batches_);

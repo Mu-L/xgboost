@@ -71,7 +71,6 @@ option(HIDE_CXX_SYMBOLS "Build shared library and hide all C++ symbols" OFF)
 option(KEEP_BUILD_ARTIFACTS_IN_BINARY_DIR "Output build artifacts in CMake binary dir" OFF)
 ## CUDA
 option(USE_CUDA  "Build with GPU acceleration" OFF)
-option(USE_PER_THREAD_DEFAULT_STREAM "Build with per-thread default stream" ON)
 option(USE_NCCL  "Build with NCCL to enable distributed GPU support." OFF)
 # This is specifically designed for PyPI binary release and should be disabled for most of the cases.
 option(USE_DLOPEN_NCCL "Whether to load nccl dynamically." OFF)
@@ -222,6 +221,24 @@ if(USE_CUDA)
   add_subdirectory(${PROJECT_SOURCE_DIR}/gputreeshap)
 
   find_package(CUDAToolkit REQUIRED)
+  find_package(CCCL CONFIG)
+  if(NOT CCCL_FOUND)
+    message(STATUS "Standalone CCCL not found. Attempting to use CCCL from CUDA Toolkit...")
+    find_package(CCCL CONFIG
+      HINTS ${CUDAToolkit_LIBRARY_DIR}/cmake)
+    if(NOT CCCL_FOUND)
+      message(STATUS "Could not locate CCCL from CUDA Toolkit. Using Thrust and CUB from CUDA Toolkit...")
+      find_package(libcudacxx CONFIG REQUIRED
+        HINTS ${CUDAToolkit_LIBRARY_DIR}/cmake)
+      find_package(CUB CONFIG REQUIRED
+        HINTS ${CUDAToolkit_LIBRARY_DIR}/cmake)
+      find_package(Thrust CONFIG REQUIRED
+        HINTS ${CUDAToolkit_LIBRARY_DIR}/cmake)
+      thrust_create_target(Thrust HOST CPP DEVICE CUDA)
+      add_library(CCCL::CCCL INTERFACE IMPORTED GLOBAL)
+      target_link_libraries(CCCL::CCCL INTERFACE libcudacxx::libcudacxx CUB::CUB Thrust)
+    endif()
+  endif()
 endif()
 
 if(FORCE_COLORED_OUTPUT AND (CMAKE_GENERATOR STREQUAL "Ninja") AND

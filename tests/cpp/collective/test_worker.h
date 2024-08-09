@@ -15,7 +15,7 @@
 #include "../../../src/collective/comm.h"
 #include "../../../src/collective/communicator-inl.h"  // for Init, Finalize
 #include "../../../src/collective/tracker.h"           // for GetHostAddress
-#include "../../../src/common/common.h"                // for AllVisibleGPUs
+#include "../../../src/common/cuda_rt_utils.h"         // for AllVisibleGPUs
 #include "../helpers.h"                                // for FileExists
 
 #if defined(XGBOOST_USE_FEDERATED)
@@ -184,6 +184,12 @@ void TestDistributedGlobal(std::int32_t n_workers, WorkerFn worker_fn, bool need
 
   SafeColl(fut.get());
   system::SocketFinalize();
+}
+
+inline std::int32_t GetWorkerLocalThreads(std::int32_t n_workers) {
+  std::int32_t n_total_threads = std::thread::hardware_concurrency();
+  auto n_threads = std::max(n_total_threads / n_workers, 1);
+  return n_threads;
 }
 
 class BaseMGPUTest : public ::testing::Test {

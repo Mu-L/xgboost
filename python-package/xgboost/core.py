@@ -14,6 +14,7 @@ from collections.abc import Mapping
 from enum import IntEnum, unique
 from functools import wraps
 from inspect import Parameter, signature
+from types import EllipsisType
 from typing import (
     Any,
     Callable,
@@ -189,6 +190,27 @@ def _register_log_callback(lib: ctypes.CDLL) -> None:
         raise XGBoostError(lib.XGBGetLastError())
 
 
+def _parse_version(ver: str) -> Tuple[Tuple[int, int, int], str]:
+    """Avoid dependency on packaging (PEP 440)."""
+    # 2.0.0-dev, 2.0.0, 2.0.0.post1, or 2.0.0rc1
+    if ver.find("post") != -1:
+        major, minor, patch = ver.split(".")[:-1]
+        postfix = ver.split(".")[-1]
+    elif "-dev" in ver:
+        major, minor, patch = ver.split("-")[0].split(".")
+        postfix = "dev"
+    else:
+        major, minor, patch = ver.split(".")
+        rc = patch.find("rc")
+        if rc != -1:
+            postfix = patch[rc:]
+            patch = patch[:rc]
+        else:
+            postfix = ""
+
+    return (int(major), int(minor), int(patch)), postfix
+
+
 def _load_lib() -> ctypes.CDLL:
     """Load xgboost Library."""
     lib_paths = find_lib_path()
@@ -236,17 +258,8 @@ Error message(s): {os_error_list}
         )
     _register_log_callback(lib)
 
-    def parse(ver: str) -> Tuple[int, int, int]:
-        """Avoid dependency on packaging (PEP 440)."""
-        # 2.0.0-dev, 2.0.0, or 2.0.0rc1
-        major, minor, patch = ver.split("-")[0].split(".")
-        rc = patch.find("rc")
-        if rc != -1:
-            patch = patch[:rc]
-        return int(major), int(minor), int(patch)
-
     libver = _lib_version(lib)
-    pyver = parse(_py_version())
+    pyver, _ = _parse_version(_py_version())
 
     # verify that we are loading the correct binary.
     if pyver != libver:
@@ -1826,7 +1839,7 @@ class Booster:
             state["handle"] = handle
         self.__dict__.update(state)
 
-    def __getitem__(self, val: Union[Integer, tuple, slice]) -> "Booster":
+    def __getitem__(self, val: Union[Integer, tuple, slice, EllipsisType]) -> "Booster":
         """Get a slice of the tree-based model.
 
         .. versionadded:: 1.3.0
@@ -1835,21 +1848,20 @@ class Booster:
         # convert to slice for all other types
         if isinstance(val, (np.integer, int)):
             val = slice(int(val), int(val + 1))
-        if isinstance(val, type(Ellipsis)):
+        if isinstance(val, EllipsisType):
             val = slice(0, 0)
         if isinstance(val, tuple):
             raise ValueError("Only supports slicing through 1 dimension.")
         # All supported types are now slice
-        # FIXME(jiamingy): Use `types.EllipsisType` once Python 3.10 is used.
         if not isinstance(val, slice):
-            msg = _expect((int, slice, np.integer, type(Ellipsis)), type(val))
+            msg = _expect((int, slice, np.integer, EllipsisType), type(val))
             raise TypeError(msg)
 
-        if isinstance(val.start, type(Ellipsis)) or val.start is None:
+        if isinstance(val.start, EllipsisType) or val.start is None:
             start = 0
         else:
             start = val.start
-        if isinstance(val.stop, type(Ellipsis)) or val.stop is None:
+        if isinstance(val.stop, EllipsisType) or val.stop is None:
             stop = 0
         else:
             stop = val.stop

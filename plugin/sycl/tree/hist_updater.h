@@ -14,12 +14,14 @@
 #include <utility>
 #include <vector>
 #include <memory>
+#include <queue>
 
 #include "../common/partition_builder.h"
 #include "split_evaluator.h"
 #include "hist_synchronizer.h"
 #include "hist_row_adder.h"
 
+#include "../../src/common/random.h"
 #include "../data.h"
 
 namespace xgboost {
@@ -62,6 +64,9 @@ class HistUpdater {
       p_last_tree_(nullptr), p_last_fmat_(fmat) {
     builder_monitor_.Init("SYCL::Quantile::HistUpdater");
     kernel_monitor_.Init("SYCL::Quantile::HistUpdater");
+    if (param.max_depth > 0) {
+      snode_device_.Resize(&qu, 1u << (param.max_depth + 1));
+    }
     const auto sub_group_sizes =
       qu_.get_device().get_info<::sycl::info::device::sub_group_sizes>();
     sub_group_size_ = sub_group_sizes.back();
@@ -74,9 +79,34 @@ class HistUpdater {
   friend class BatchHistSynchronizer<GradientSumT>;
   friend class BatchHistRowsAdder<GradientSumT>;
 
+  struct SplitQuery {
+    bst_node_t nid;
+    size_t fid;
+    const GradientPairT* hist;
+  };
+
   void InitSampling(const USMVector<GradientPair, MemoryType::on_device> &gpair,
                     USMVector<size_t, MemoryType::on_device>* row_indices);
 
+  void EvaluateSplits(const std::vector<ExpandEntry>& nodes_set,
+                      const common::GHistIndexMatrix& gmat,
+                      const RegTree& tree);
+
+  // Enumerate the split values of specific feature
+  // Returns the sum of gradients corresponding to the data points that contains a non-missing
+  // value for the particular feature fid.
+  static void EnumerateSplit(const ::sycl::sub_group& sg,
+      const uint32_t* cut_ptr, const bst_float* cut_val, const GradientPairT* hist_data,
+      const NodeEntry<GradientSumT> &snode, SplitEntry<GradientSumT>* p_best, bst_uint fid,
+      bst_uint nodeID,
+      typename TreeEvaluator<GradientSumT>::SplitEvaluator const &evaluator,
+      float min_child_weight);
+
+  void ApplySplit(std::vector<ExpandEntry> nodes,
+                      const common::GHistIndexMatrix& gmat,
+                      RegTree* p_tree);
+
+  void AddSplitsToRowSet(const std::vector<ExpandEntry>& nodes, RegTree* p_tree);
 
   void InitData(const common::GHistIndexMatrix& gmat,
                 const USMVector<GradientPair, MemoryType::on_device> &gpair,
@@ -97,7 +127,6 @@ class HistUpdater {
   void InitNewNode(int nid,
                    const common::GHistIndexMatrix& gmat,
                    const USMVector<GradientPair, MemoryType::on_device> &gpair,
-                   const DMatrix& fmat,
                    const RegTree& tree);
 
   void BuildLocalHistograms(const common::GHistIndexMatrix &gmat,
@@ -110,6 +139,18 @@ class HistUpdater {
                       RegTree *p_tree,
                       const USMVector<GradientPair, MemoryType::on_device> &gpair);
 
+  void ExpandWithLossGuide(const common::GHistIndexMatrix& gmat,
+                           RegTree* p_tree,
+                           const USMVector<GradientPair, MemoryType::on_device>& gpair);
+
+  inline static bool LossGuide(ExpandEntry lhs, ExpandEntry rhs) {
+    if (lhs.GetLossChange() == rhs.GetLossChange()) {
+      return lhs.GetNodeId() > rhs.GetNodeId();  // favor small timestamp
+    } else {
+      return lhs.GetLossChange() < rhs.GetLossChange();  // favor large loss_chg
+    }
+  }
+
   //  --data fields--
   const Context* ctx_;
   size_t sub_group_size_;
@@ -118,6 +159,14 @@ class HistUpdater {
   common::RowSetCollection row_set_collection_;
 
   const xgboost::tree::TrainParam& param_;
+  std::shared_ptr<xgboost::common::ColumnSampler> column_sampler_;
+
+  std::vector<SplitQuery> split_queries_host_;
+  USMVector<SplitQuery, MemoryType::on_device> split_queries_device_;
+
+  USMVector<SplitEntry<GradientSumT>, MemoryType::on_device> best_splits_device_;
+  std::vector<SplitEntry<GradientSumT>> best_splits_host_;
+
   TreeEvaluator<GradientSumT> tree_evaluator_;
   std::unique_ptr<TreeUpdater> pruner_;
   FeatureInteractionConstraintHost interaction_constraints_;
@@ -125,6 +174,12 @@ class HistUpdater {
   // back pointers to tree and data matrix
   const RegTree* p_last_tree_;
   DMatrix const* const p_last_fmat_;
+
+  using ExpandQueue =
+      std::priority_queue<ExpandEntry, std::vector<ExpandEntry>,
+                          std::function<bool(ExpandEntry, ExpandEntry)>>;
+
+  std::unique_ptr<ExpandQueue> qexpand_loss_guided_;
 
   enum DataLayout { kDenseDataZeroBased, kDenseDataOneBased, kSparseData };
   DataLayout data_layout_;
@@ -137,6 +192,7 @@ class HistUpdater {
 
   /*! \brief TreeNode Data: statistics for each constructed node */
   std::vector<NodeEntry<GradientSumT>> snode_host_;
+  USMVector<NodeEntry<GradientSumT>, MemoryType::on_device> snode_device_;
 
   xgboost::common::Monitor builder_monitor_;
   xgboost::common::Monitor kernel_monitor_;
@@ -146,6 +202,8 @@ class HistUpdater {
   uint32_t fid_least_bins_;
 
   uint64_t seed_ = 0;
+
+  common::PartitionBuilder partition_builder_;
 
   // key is the node id which should be calculated by Subtraction Trick, value is the node which
   // provides the evidence for substracts

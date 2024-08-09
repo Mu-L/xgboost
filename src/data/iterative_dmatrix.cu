@@ -1,12 +1,15 @@
 /**
  * Copyright 2020-2024, XGBoost contributors
  */
-#include <algorithm>
-#include <memory>
+#include <algorithm>  // for max
+#include <memory>     // for shared_ptr
+#include <utility>    // for move
+#include <vector>     // for vector
 
 #include "../collective/allreduce.h"
+#include "../common/cuda_rt_utils.h"  // for AllVisibleGPUs
 #include "../common/hist_util.cuh"
-#include "batch_utils.h"  // for RegenGHist
+#include "batch_utils.h"  // for RegenGHist, CheckParam
 #include "device_adapter.cuh"
 #include "ellpack_page.cuh"
 #include "iterative_dmatrix.h"
@@ -45,11 +48,17 @@ void IterativeDMatrix::InitFromCUDA(Context const* ctx, BatchParam const& p,
 
   int32_t current_device;
   dh::safe_cuda(cudaGetDevice(&current_device));
+  auto get_ctx = [&]() {
+    Context d_ctx = (ctx->IsCUDA()) ? *ctx : Context{}.MakeCUDA(current_device);
+    CHECK(!d_ctx.IsCPU());
+    return d_ctx;
+  };
   auto get_device = [&]() {
     auto d = (ctx->IsCUDA()) ? ctx->Device() : DeviceOrd::CUDA(current_device);
     CHECK(!d.IsCPU());
     return d;
   };
+  fmat_ctx_ = get_ctx();
 
   /**
    * Generate quantiles
@@ -118,7 +127,7 @@ void IterativeDMatrix::InitFromCUDA(Context const* ctx, BatchParam const& p,
       // that case device id is invalid.
       ellpack_.reset(new EllpackPage);
       *(ellpack_->Impl()) =
-          EllpackPageImpl(get_device(), cuts, this->IsDense(), row_stride, accumulated_rows);
+          EllpackPageImpl(&fmat_ctx_, cuts, this->IsDense(), row_stride, accumulated_rows);
     }
   };
 
@@ -142,10 +151,10 @@ void IterativeDMatrix::InitFromCUDA(Context const* ctx, BatchParam const& p,
     proxy->Info().feature_types.SetDevice(get_device());
     auto d_feature_types = proxy->Info().feature_types.ConstDeviceSpan();
     auto new_impl = cuda_impl::Dispatch(proxy, [&](auto const& value) {
-      return EllpackPageImpl(value, missing, get_device(), is_dense, row_counts_span,
-                             d_feature_types, row_stride, rows, cuts);
+      return EllpackPageImpl(&fmat_ctx_, value, missing, is_dense, row_counts_span, d_feature_types,
+                             row_stride, rows, cuts);
     });
-    size_t num_elements = ellpack_->Impl()->Copy(get_device(), &new_impl, offset);
+    std::size_t num_elements = ellpack_->Impl()->Copy(&fmat_ctx_, &new_impl, offset);
     offset += num_elements;
 
     proxy->Info().num_row_ = num_rows();
@@ -172,7 +181,7 @@ void IterativeDMatrix::InitFromCUDA(Context const* ctx, BatchParam const& p,
 BatchSet<EllpackPage> IterativeDMatrix::GetEllpackBatches(Context const* ctx,
                                                           BatchParam const& param) {
   if (param.Initialized()) {
-    CheckParam(param);
+    detail::CheckParam(this->batch_, param);
     CHECK(!detail::RegenGHist(param, batch_)) << error::InconsistentMaxBin();
   }
   if (!ellpack_ && !ghist_) {
@@ -201,9 +210,5 @@ BatchSet<EllpackPage> IterativeDMatrix::GetEllpackBatches(Context const* ctx,
   CHECK(ellpack_);
   auto begin_iter = BatchIterator<EllpackPage>(new SimpleBatchIteratorImpl<EllpackPage>(ellpack_));
   return BatchSet<EllpackPage>(begin_iter);
-}
-
-void GetCutsFromEllpack(EllpackPage const& page, common::HistogramCuts* cuts) {
-  *cuts = page.Impl()->Cuts();
 }
 }  // namespace xgboost::data
