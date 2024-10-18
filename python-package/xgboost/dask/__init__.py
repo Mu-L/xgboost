@@ -34,8 +34,6 @@ Optional dask configuration
 import collections
 import logging
 import platform
-import socket
-import warnings
 from collections import defaultdict
 from contextlib import contextmanager
 from functools import partial, update_wrapper
@@ -292,7 +290,7 @@ class DaskDMatrix:
     @_deprecate_positional_args
     def __init__(
         self,
-        client: "distributed.Client",
+        client: Optional["distributed.Client"],
         data: _DataT,
         label: Optional[_DaskCollection] = None,
         *,
@@ -339,8 +337,8 @@ class DaskDMatrix:
 
         self._init = client.sync(
             self._map_local_data,
-            client,
-            data,
+            client=client,
+            data=data,
             label=label,
             weights=weight,
             base_margin=base_margin,
@@ -355,6 +353,7 @@ class DaskDMatrix:
 
     async def _map_local_data(
         self,
+        *,
         client: "distributed.Client",
         data: _DataT,
         label: Optional[_DaskCollection] = None,
@@ -589,6 +588,7 @@ class DaskPartitionIter(DataIter):  # pylint: disable=R0902
         self,
         data: List[Any],
         label: Optional[List[Any]] = None,
+        *,
         weight: Optional[List[Any]] = None,
         base_margin: Optional[List[Any]] = None,
         qid: Optional[List[Any]] = None,
@@ -634,11 +634,11 @@ class DaskPartitionIter(DataIter):  # pylint: disable=R0902
         """Reset the iterator"""
         self._iter = 0
 
-    def next(self, input_data: Callable) -> int:
+    def next(self, input_data: Callable) -> bool:
         """Yield next batch of data"""
         if self._iter == len(self._data):
-            # Return 0 when there's no more batch.
-            return 0
+            # Return False when there's no more batch.
+            return False
 
         input_data(
             data=self.data(),
@@ -654,7 +654,7 @@ class DaskPartitionIter(DataIter):  # pylint: disable=R0902
             feature_weights=self._feature_weights,
         )
         self._iter += 1
-        return 1
+        return True
 
 
 class DaskQuantileDMatrix(DaskDMatrix):
@@ -663,7 +663,7 @@ class DaskQuantileDMatrix(DaskDMatrix):
     @_deprecate_positional_args
     def __init__(
         self,
-        client: "distributed.Client",
+        client: Optional["distributed.Client"],
         data: _DataT,
         label: Optional[_DaskCollection] = None,
         *,
@@ -674,13 +674,14 @@ class DaskQuantileDMatrix(DaskDMatrix):
         feature_names: Optional[FeatureNames] = None,
         feature_types: Optional[Union[Any, List[Any]]] = None,
         max_bin: Optional[int] = None,
-        ref: Optional[DMatrix] = None,
+        ref: Optional[DaskDMatrix] = None,
         group: Optional[_DaskCollection] = None,
         qid: Optional[_DaskCollection] = None,
         label_lower_bound: Optional[_DaskCollection] = None,
         label_upper_bound: Optional[_DaskCollection] = None,
         feature_weights: Optional[_DaskCollection] = None,
         enable_categorical: bool = False,
+        max_quantile_batches: Optional[int] = None,
     ) -> None:
         super().__init__(
             client=client,
@@ -700,18 +701,21 @@ class DaskQuantileDMatrix(DaskDMatrix):
             enable_categorical=enable_categorical,
         )
         self.max_bin = max_bin
+        self.max_quantile_batches = max_quantile_batches
         self.is_quantile = True
         self._ref: Optional[int] = id(ref) if ref is not None else None
 
     def _create_fn_args(self, worker_addr: str) -> Dict[str, Any]:
         args = super()._create_fn_args(worker_addr)
         args["max_bin"] = self.max_bin
+        args["max_quantile_batches"] = self.max_quantile_batches
         if self._ref is not None:
             args["ref"] = self._ref
         return args
 
 
 def _create_quantile_dmatrix(
+    *,
     feature_names: Optional[FeatureNames],
     feature_types: Optional[Union[Any, List[Any]]],
     feature_weights: Optional[Any],
@@ -720,6 +724,7 @@ def _create_quantile_dmatrix(
     parts: Optional[_DataParts],
     max_bin: int,
     enable_categorical: bool,
+    max_quantile_batches: Optional[int],
     ref: Optional[DMatrix] = None,
 ) -> QuantileDMatrix:
     worker = distributed.get_worker()
@@ -734,6 +739,7 @@ def _create_quantile_dmatrix(
             max_bin=max_bin,
             ref=ref,
             enable_categorical=enable_categorical,
+            max_quantile_batches=max_quantile_batches,
         )
         return d
 
@@ -752,11 +758,13 @@ def _create_quantile_dmatrix(
         max_bin=max_bin,
         ref=ref,
         enable_categorical=enable_categorical,
+        max_quantile_batches=max_quantile_batches,
     )
     return dmatrix
 
 
 def _create_dmatrix(
+    *,
     feature_names: Optional[FeatureNames],
     feature_types: Optional[Union[Any, List[Any]]],
     feature_weights: Optional[Any],
@@ -927,6 +935,7 @@ def _get_dmatrices(
 
 
 async def _train_async(
+    *,
     client: "distributed.Client",
     global_config: Dict[str, Any],
     dconfig: Optional[Dict[str, Any]],
@@ -947,7 +956,7 @@ async def _train_async(
     _rabit_args = await _get_rabit_args(len(workers), dconfig, client)
     _check_distributed_params(params)
 
-    def dispatched_train(
+    def dispatched_train(  # pylint: disable=too-many-positional-arguments
         parameters: Dict,
         rabit_args: Dict[str, Union[str, int]],
         train_id: int,
@@ -1115,6 +1124,7 @@ def _maybe_dataframe(
 
 
 async def _direct_predict_impl(  # pylint: disable=too-many-branches
+    *,
     mapped_predict: Callable,
     booster: "distributed.Future",
     data: _DataT,
@@ -1223,12 +1233,14 @@ def _infer_predict_output(
 async def _get_model_future(
     client: "distributed.Client", model: Union[Booster, Dict, "distributed.Future"]
 ) -> "distributed.Future":
-    # See https://github.com/dask/dask/issues/11179#issuecomment-2168094529 for
-    # the use of hash.
+    # See https://github.com/dask/dask/issues/11179#issuecomment-2168094529 for the use
+    # of hash.
+    # https://github.com/dask/distributed/pull/8796 Don't use broadcast in the `scatter`
+    # call, otherwise, the predict function might hang.
     if isinstance(model, Booster):
-        booster = await client.scatter(model, broadcast=True, hash=False)
+        booster = await client.scatter(model, hash=False)
     elif isinstance(model, dict):
-        booster = await client.scatter(model["booster"], broadcast=True, hash=False)
+        booster = await client.scatter(model["booster"], hash=False)
     elif isinstance(model, distributed.Future):
         booster = model
         t = booster.type
@@ -1247,6 +1259,7 @@ async def _predict_async(
     global_config: Dict[str, Any],
     model: Union[Booster, Dict, "distributed.Future"],
     data: _DataT,
+    *,
     output_margin: bool,
     missing: float,
     pred_leaf: bool,
@@ -1302,7 +1315,12 @@ async def _predict_async(
             )
         )
         return await _direct_predict_impl(
-            mapped_predict, _booster, data, None, _output_shape, meta
+            mapped_predict=mapped_predict,
+            booster=_booster,
+            data=data,
+            base_margin=None,
+            output_shape=_output_shape,
+            meta=meta,
         )
 
     output_shape, _ = await client.compute(
@@ -1390,10 +1408,12 @@ async def _predict_async(
     return predictions
 
 
+@_deprecate_positional_args
 def predict(  # pylint: disable=unused-argument
     client: Optional["distributed.Client"],
     model: Union[TrainReturnT, Booster, "distributed.Future"],
     data: Union[DaskDMatrix, _DataT],
+    *,
     output_margin: bool = False,
     missing: float = numpy.nan,
     pred_leaf: bool = False,
@@ -1445,6 +1465,7 @@ def predict(  # pylint: disable=unused-argument
 
 
 async def _inplace_predict_async(  # pylint: disable=too-many-branches
+    *,
     client: "distributed.Client",
     global_config: Dict[str, Any],
     model: Union[Booster, Dict, "distributed.Future"],
@@ -1499,14 +1520,21 @@ async def _inplace_predict_async(  # pylint: disable=too-many-branches
         )
     )
     return await _direct_predict_impl(
-        mapped_predict, booster, data, base_margin, shape, meta
+        mapped_predict=mapped_predict,
+        booster=booster,
+        data=data,
+        base_margin=base_margin,
+        output_shape=shape,
+        meta=meta,
     )
 
 
+@_deprecate_positional_args
 def inplace_predict(  # pylint: disable=unused-argument
     client: Optional["distributed.Client"],
     model: Union[TrainReturnT, Booster, "distributed.Future"],
     data: _DataT,
+    *,
     iteration_range: IterationRange = (0, 0),
     predict_type: str = "value",
     missing: float = numpy.nan,
@@ -1566,6 +1594,7 @@ def inplace_predict(  # pylint: disable=unused-argument
 
 async def _async_wrap_evaluation_matrices(
     client: Optional["distributed.Client"],
+    device: Optional[str],
     tree_method: Optional[str],
     max_bin: Optional[int],
     **kwargs: Any,
@@ -1573,7 +1602,7 @@ async def _async_wrap_evaluation_matrices(
     """A switch function for async environment."""
 
     def _dispatch(ref: Optional[DaskDMatrix], **kwargs: Any) -> DaskDMatrix:
-        if _can_use_qdm(tree_method):
+        if _can_use_qdm(tree_method, device):
             return DaskQuantileDMatrix(
                 client=client, ref=ref, max_bin=max_bin, **kwargs
             )
@@ -1612,6 +1641,7 @@ class DaskScikitLearnBase(XGBModel):
     async def _predict_async(
         self,
         data: _DataT,
+        *,
         output_margin: bool,
         validate_features: bool,
         base_margin: Optional[_DaskCollection],
@@ -1632,7 +1662,7 @@ class DaskScikitLearnBase(XGBModel):
             if isinstance(predts, dd.DataFrame):
                 predts = predts.to_dask_array()
         else:
-            test_dmatrix = await DaskDMatrix(
+            test_dmatrix: DaskDMatrix = await DaskDMatrix(  # type: ignore
                 self.client,
                 data=data,
                 base_margin=base_margin,
@@ -1649,9 +1679,11 @@ class DaskScikitLearnBase(XGBModel):
             )
         return predts
 
+    @_deprecate_positional_args
     def predict(
         self,
         X: _DataT,
+        *,
         output_margin: bool = False,
         validate_features: bool = True,
         base_margin: Optional[_DaskCollection] = None,
@@ -1673,7 +1705,7 @@ class DaskScikitLearnBase(XGBModel):
         iteration_range: Optional[IterationRange] = None,
     ) -> Any:
         iteration_range = self._get_iteration_range(iteration_range)
-        test_dmatrix = await DaskDMatrix(
+        test_dmatrix: DaskDMatrix = await DaskDMatrix(  # type: ignore
             self.client,
             data=X,
             missing=self.missing,
@@ -1762,6 +1794,7 @@ class DaskXGBRegressor(DaskScikitLearnBase, XGBRegressorBase):
         self,
         X: _DataT,
         y: _DaskCollection,
+        *,
         sample_weight: Optional[_DaskCollection],
         base_margin: Optional[_DaskCollection],
         eval_set: Optional[Sequence[Tuple[_DaskCollection, _DaskCollection]]],
@@ -1774,6 +1807,7 @@ class DaskXGBRegressor(DaskScikitLearnBase, XGBRegressorBase):
         params = self.get_xgb_params()
         dtrain, evals = await _async_wrap_evaluation_matrices(
             client=self.client,
+            device=self.device,
             tree_method=self.tree_method,
             max_bin=self.max_bin,
             X=X,
@@ -1830,8 +1864,8 @@ class DaskXGBRegressor(DaskScikitLearnBase, XGBRegressorBase):
         sample_weight: Optional[_DaskCollection] = None,
         base_margin: Optional[_DaskCollection] = None,
         eval_set: Optional[Sequence[Tuple[_DaskCollection, _DaskCollection]]] = None,
-        verbose: Union[int, bool] = True,
-        xgb_model: Optional[Union[Booster, XGBModel]] = None,
+        verbose: Optional[Union[int, bool]] = True,
+        xgb_model: Optional[Union[Booster, str, XGBModel]] = None,
         sample_weight_eval_set: Optional[Sequence[_DaskCollection]] = None,
         base_margin_eval_set: Optional[Sequence[_DaskCollection]] = None,
         feature_weights: Optional[_DaskCollection] = None,
@@ -1851,6 +1885,7 @@ class DaskXGBClassifier(DaskScikitLearnBase, XGBClassifierBase):
         self,
         X: _DataT,
         y: _DaskCollection,
+        *,
         sample_weight: Optional[_DaskCollection],
         base_margin: Optional[_DaskCollection],
         eval_set: Optional[Sequence[Tuple[_DaskCollection, _DaskCollection]]],
@@ -1863,6 +1898,7 @@ class DaskXGBClassifier(DaskScikitLearnBase, XGBClassifierBase):
         params = self.get_xgb_params()
         dtrain, evals = await _async_wrap_evaluation_matrices(
             self.client,
+            device=self.device,
             tree_method=self.tree_method,
             max_bin=self.max_bin,
             X=X,
@@ -1938,8 +1974,8 @@ class DaskXGBClassifier(DaskScikitLearnBase, XGBClassifierBase):
         sample_weight: Optional[_DaskCollection] = None,
         base_margin: Optional[_DaskCollection] = None,
         eval_set: Optional[Sequence[Tuple[_DaskCollection, _DaskCollection]]] = None,
-        verbose: Union[int, bool] = True,
-        xgb_model: Optional[Union[Booster, XGBModel]] = None,
+        verbose: Optional[Union[int, bool]] = True,
+        xgb_model: Optional[Union[Booster, str, XGBModel]] = None,
         sample_weight_eval_set: Optional[Sequence[_DaskCollection]] = None,
         base_margin_eval_set: Optional[Sequence[_DaskCollection]] = None,
         feature_weights: Optional[_DaskCollection] = None,
@@ -1994,13 +2030,18 @@ class DaskXGBClassifier(DaskScikitLearnBase, XGBClassifierBase):
     async def _predict_async(
         self,
         data: _DataT,
+        *,
         output_margin: bool,
         validate_features: bool,
         base_margin: Optional[_DaskCollection],
         iteration_range: Optional[IterationRange],
     ) -> _DaskCollection:
         pred_probs = await super()._predict_async(
-            data, output_margin, validate_features, base_margin, iteration_range
+            data,
+            output_margin=output_margin,
+            validate_features=validate_features,
+            base_margin=base_margin,
+            iteration_range=iteration_range,
         )
         if output_margin:
             return pred_probs
@@ -2044,6 +2085,7 @@ class DaskXGBRanker(DaskScikitLearnBase, XGBRankerMixIn):
         self,
         X: _DataT,
         y: _DaskCollection,
+        *,
         group: Optional[_DaskCollection],
         qid: Optional[_DaskCollection],
         sample_weight: Optional[_DaskCollection],
@@ -2065,6 +2107,7 @@ class DaskXGBRanker(DaskScikitLearnBase, XGBRankerMixIn):
         params = self.get_xgb_params()
         dtrain, evals = await _async_wrap_evaluation_matrices(
             self.client,
+            device=self.device,
             tree_method=self.tree_method,
             max_bin=self.max_bin,
             X=X,
@@ -2120,8 +2163,8 @@ class DaskXGBRanker(DaskScikitLearnBase, XGBRankerMixIn):
         eval_set: Optional[Sequence[Tuple[_DaskCollection, _DaskCollection]]] = None,
         eval_group: Optional[Sequence[_DaskCollection]] = None,
         eval_qid: Optional[Sequence[_DaskCollection]] = None,
-        verbose: Union[int, bool] = False,
-        xgb_model: Optional[Union[XGBModel, Booster]] = None,
+        verbose: Optional[Union[int, bool]] = False,
+        xgb_model: Optional[Union[XGBModel, str, Booster]] = None,
         sample_weight_eval_set: Optional[Sequence[_DaskCollection]] = None,
         base_margin_eval_set: Optional[Sequence[_DaskCollection]] = None,
         feature_weights: Optional[_DaskCollection] = None,
@@ -2183,8 +2226,8 @@ class DaskXGBRFRegressor(DaskXGBRegressor):
         sample_weight: Optional[_DaskCollection] = None,
         base_margin: Optional[_DaskCollection] = None,
         eval_set: Optional[Sequence[Tuple[_DaskCollection, _DaskCollection]]] = None,
-        verbose: Union[int, bool] = True,
-        xgb_model: Optional[Union[Booster, XGBModel]] = None,
+        verbose: Optional[Union[int, bool]] = True,
+        xgb_model: Optional[Union[Booster, str, XGBModel]] = None,
         sample_weight_eval_set: Optional[Sequence[_DaskCollection]] = None,
         base_margin_eval_set: Optional[Sequence[_DaskCollection]] = None,
         feature_weights: Optional[_DaskCollection] = None,
@@ -2244,8 +2287,8 @@ class DaskXGBRFClassifier(DaskXGBClassifier):
         sample_weight: Optional[_DaskCollection] = None,
         base_margin: Optional[_DaskCollection] = None,
         eval_set: Optional[Sequence[Tuple[_DaskCollection, _DaskCollection]]] = None,
-        verbose: Union[int, bool] = True,
-        xgb_model: Optional[Union[Booster, XGBModel]] = None,
+        verbose: Optional[Union[int, bool]] = True,
+        xgb_model: Optional[Union[Booster, str, XGBModel]] = None,
         sample_weight_eval_set: Optional[Sequence[_DaskCollection]] = None,
         base_margin_eval_set: Optional[Sequence[_DaskCollection]] = None,
         feature_weights: Optional[_DaskCollection] = None,

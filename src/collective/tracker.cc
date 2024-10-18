@@ -7,11 +7,10 @@
 #include <sys/socket.h>  // socket, AF_INET6, AF_INET, connect, getsockname
 #endif                   // defined(__unix__) || defined(__APPLE__)
 
-#if !defined(NOMINMAX) && defined(_WIN32)
-#define NOMINMAX
-#endif  // !defined(NOMINMAX)
-
 #if defined(_WIN32)
+// Guard the include
+#include <xgboost/windefs.h>
+// Socket API
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #endif  // defined(_WIN32)
@@ -24,6 +23,7 @@
 #include <utility>    // for move, forward
 
 #include "../common/json_utils.h"
+#include "../common/threading_utils.h"  // for NameThread
 #include "comm.h"
 #include "protocol.h"  // for kMagic, PeerInfo
 #include "tracker.h"
@@ -123,7 +123,8 @@ RabitTracker::RabitTracker(Json const& config) : Tracker{config} {
     listener_ = TCPSocket::Create(addr.IsV4() ? SockDomain::kV4 : SockDomain::kV6);
     return listener_.Bind(host_, &this->port_);
   } << [&] {
-    return listener_.Listen();
+    CHECK_GT(this->n_workers_, 0);
+    return listener_.Listen(this->n_workers_);
   };
   SafeColl(rc);
 }
@@ -144,6 +145,8 @@ Result RabitTracker::Bootstrap(std::vector<WorkerProxy>* p_workers) {
       Json::Dump(jnext, &str);
       worker.Send(StringView{str});
     });
+    std::string name = "tkbs_t-" + std::to_string(r);
+    common::NameThread(&bootstrap_threads.back(), name.c_str());
   }
 
   for (auto& t : bootstrap_threads) {

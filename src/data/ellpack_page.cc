@@ -27,7 +27,7 @@ EllpackPage::EllpackPage(Context const*, DMatrix*, const BatchParam&) {
                 "EllpackPage is required";
 }
 
-EllpackPage::~EllpackPage() {
+EllpackPage::~EllpackPage() noexcept(false) {
   LOG(FATAL) << "Internal Error: XGBoost is not compiled with CUDA but "
                 "EllpackPage is required";
 }
@@ -46,6 +46,12 @@ bst_idx_t EllpackPage::Size() const {
   LOG(FATAL) << "Internal Error: XGBoost is not compiled with CUDA but "
                 "EllpackPage is required";
   return impl_->Cuts();
+}
+
+[[nodiscard]] bst_idx_t EllpackPage::BaseRowId() const {
+  LOG(FATAL) << "Internal Error: XGBoost is not compiled with CUDA but "
+                "EllpackPage is required";
+  return 0;
 }
 }  // namespace xgboost
 

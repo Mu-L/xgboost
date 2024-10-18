@@ -16,6 +16,8 @@ class LintersPaths:
     BLACK = (
         # core
         "python-package/",
+        # CI
+        "tests/ci_build/tidy.py",
         # tests
         "tests/python/test_config.py",
         "tests/python/test_callback.py",
@@ -30,6 +32,7 @@ class LintersPaths:
         "tests/python/test_tree_regularization.py",
         "tests/python/test_training_continuation.py",
         "tests/python/test_shap.py",
+        "tests/python/test_updaters.py",
         "tests/python/test_model_io.py",
         "tests/python/test_with_pandas.py",
         "tests/python-gpu/",
@@ -102,6 +105,7 @@ class LintersPaths:
         "tests/test_distributed/test_with_spark/test_data.py",
         "tests/test_distributed/test_gpu_with_spark/test_data.py",
         "tests/test_distributed/test_gpu_with_dask/test_gpu_with_dask.py",
+        "tests/test_distributed/test_gpu_with_dask/test_gpu_external_memory.py",
         # demo
         "demo/dask/",
         "demo/json-model/json_parser.py",
@@ -119,6 +123,7 @@ class LintersPaths:
         "demo/guide-python/learning_to_rank.py",
         "demo/aft_survival/aft_survival_viz_demo.py",
         # CI
+        "tests/ci_build/tidy.py",
         "tests/ci_build/lint_python.py",
         "tests/ci_build/test_r_package.py",
         "tests/ci_build/test_utils.py",

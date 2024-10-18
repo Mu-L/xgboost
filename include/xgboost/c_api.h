@@ -308,35 +308,40 @@ XGB_DLL int XGDMatrixCreateFromCudaArrayInterface(char const *data, char const *
  * used by JVM packages.  It uses `XGBoostBatchCSR` to accept batches for CSR formated
  * input, and concatenate them into 1 final big CSR.  The related functions are:
  *
- * - \ref XGBCallbackSetData
- * - \ref XGBCallbackDataIterNext
- * - \ref XGDMatrixCreateFromDataIter
+ * - @ref XGBCallbackSetData
+ * - @ref XGBCallbackDataIterNext
+ * - @ref XGDMatrixCreateFromDataIter
  *
- * Another set is used by external data iterator. It accept foreign data iterators as
+ * Another set is used by external data iterator. It accepts foreign data iterators as
  * callbacks.  There are 2 different senarios where users might want to pass in callbacks
- * instead of raw data.  First it's the Quantile DMatrix used by hist and GPU Hist. For
- * this case, the data is first compressed by quantile sketching then merged.  This is
- * particular useful for distributed setting as it eliminates 2 copies of data.  1 by a
- * `concat` from external library to make the data into a blob for normal DMatrix
- * initialization, another by the internal CSR copy of DMatrix.  The second use case is
- * external memory support where users can pass a custom data iterator into XGBoost for
- * loading data in batches.  There are short notes on each of the use cases in respected
- * DMatrix factory function.
+ * instead of raw data.  First it's the Quantile DMatrix used by the hist and GPU-based
+ * hist tree method. For this case, the data is first compressed by quantile sketching
+ * then merged.  This is particular useful for distributed setting as it eliminates 2
+ * copies of data. First one by a `concat` from external library to make the data into a
+ * blob for normal DMatrix initialization, another one by the internal CSR copy of
+ * DMatrix.
+ *
+ * The second use case is external memory support where users can pass a custom data
+ * iterator into XGBoost for loading data in batches. For both cases, the iterator is only
+ * used during the construction of the DMatrix and can be safely freed after construction
+ * finishes. There are short notes on each of the use cases in respected DMatrix factory
+ * function.
  *
  * Related functions are:
  *
  * # Factory functions
- * - \ref XGDMatrixCreateFromCallback for external memory
- * - \ref XGQuantileDMatrixCreateFromCallback for quantile DMatrix
+ * - @ref XGDMatrixCreateFromCallback for external memory
+ * - @ref XGQuantileDMatrixCreateFromCallback for quantile DMatrix
+ * - @ref XGExtMemQuantileDMatrixCreateFromCallback for External memory Quantile DMatrix
  *
  * # Proxy that callers can use to pass data to XGBoost
- * - \ref XGProxyDMatrixCreate
- * - \ref XGDMatrixCallbackNext
- * - \ref DataIterResetCallback
- * - \ref XGProxyDMatrixSetDataCudaArrayInterface
- * - \ref XGProxyDMatrixSetDataCudaColumnar
- * - \ref XGProxyDMatrixSetDataDense
- * - \ref XGProxyDMatrixSetDataCSR
+ * - @ref XGProxyDMatrixCreate
+ * - @ref XGDMatrixCallbackNext
+ * - @ref DataIterResetCallback
+ * - @ref XGProxyDMatrixSetDataCudaArrayInterface
+ * - @ref XGProxyDMatrixSetDataCudaColumnar
+ * - @ref XGProxyDMatrixSetDataDense
+ * - @ref XGProxyDMatrixSetDataCSR
  * - ... (data setters)
  *
  * @{
@@ -346,7 +351,7 @@ XGB_DLL int XGDMatrixCreateFromCudaArrayInterface(char const *data, char const *
 
 /*! \brief handle to a external data iterator */
 typedef void *DataIterHandle;  // NOLINT(*)
-/*! \brief handle to a internal data holder. */
+/** @brief handle to an internal data holder. */
 typedef void *DataHolderHandle;  // NOLINT(*)
 
 
@@ -402,6 +407,7 @@ XGB_EXTERN_C typedef int XGBCallbackDataIterNext(  // NOLINT(*)
  * \param data_handle The handle to the data.
  * \param callback The callback to get the data.
  * \param cache_info Additional information about cache file, can be null.
+ * \param missing Which value to represent missing value.
  * \param out The created DMatrix
  * \return 0 when success, -1 when failure happens.
  */
@@ -409,6 +415,7 @@ XGB_DLL int XGDMatrixCreateFromDataIter(
     DataIterHandle data_handle,
     XGBCallbackDataIterNext* callback,
     const char* cache_info,
+    float missing,
     DMatrixHandle *out);
 
 /**
@@ -470,36 +477,81 @@ XGB_DLL int XGDMatrixCreateFromCallback(DataIterHandle iter, DMatrixHandle proxy
  * @example external_memory.c
  */
 
-/*!
- * \brief Create a Quantile DMatrix with data iterator.
+/**
+ * @brief Create a Quantile DMatrix with a data iterator.
  *
  * Short note for how to use the second set of callback for (GPU)Hist tree method:
  *
  * - Step 0: Define a data iterator with 2 methods `reset`, and `next`.
- * - Step 1: Create a DMatrix proxy by \ref XGProxyDMatrixCreate and hold the handle.
+ * - Step 1: Create a DMatrix proxy by @ref XGProxyDMatrixCreate and hold the handle.
  * - Step 2: Pass the iterator handle, proxy handle and 2 methods into
  *           `XGQuantileDMatrixCreateFromCallback`.
  * - Step 3: Call appropriate data setters in `next` functions.
  *
  * See test_iterative_dmatrix.cu or Python interface for examples.
  *
- * \param iter     A handle to external data iterator.
- * \param proxy    A DMatrix proxy handle created by \ref XGProxyDMatrixCreate.
- * \param ref      Reference DMatrix for providing quantile information.
- * \param reset    Callback function resetting the iterator state.
- * \param next     Callback function yielding the next batch of data.
- * \param config   JSON encoded parameters for DMatrix construction.  Accepted fields are:
+ * @param iter     A handle to external data iterator.
+ * @param proxy    A DMatrix proxy handle created by @ref XGProxyDMatrixCreate.
+ * @param ref      Reference DMatrix for providing quantile information.
+ * @param reset    Callback function resetting the iterator state.
+ * @param next     Callback function yielding the next batch of data.
+ * @param config   JSON encoded parameters for DMatrix construction.  Accepted fields are:
  *   - missing:      Which value to represent missing value
  *   - nthread (optional): Number of threads used for initializing DMatrix.
- *   - max_bin (optional): Maximum number of bins for building histogram.
- * \param out      The created Device Quantile DMatrix
+ *   - max_bin (optional): Maximum number of bins for building histogram. Must be consistent with
+ *                         the corresponding booster training parameter.
+ *   - max_quantile_blocks (optional): For GPU-based inputs, XGBoost handles incoming
+ *       batches with multiple growing substreams. This parameter sets the maximum number
+ *       of batches before XGBoost can cut the sub-stream and create a new one. This can
+ *       help bound the memory usage. By default, XGBoost grows new sub-streams
+ *       exponentially until batches are exhausted. Only used for the training dataset and
+ *       the default is None (unbounded).
+ * @param out      The created Quantile DMatrix.
  *
- * \return 0 when success, -1 when failure happens
+ * @return 0 when success, -1 when failure happens
  */
 XGB_DLL int XGQuantileDMatrixCreateFromCallback(DataIterHandle iter, DMatrixHandle proxy,
                                                 DataIterHandle ref, DataIterResetCallback *reset,
                                                 XGDMatrixCallbackNext *next, char const *config,
                                                 DMatrixHandle *out);
+
+/**
+ * @brief Create a Quantile DMatrix backed by external memory.
+ *
+ * @since 3.0.0
+ *
+ * @note This is experimental and subject to change.
+ *
+ * @param iter     A handle to external data iterator.
+ * @param proxy    A DMatrix proxy handle created by @ref XGProxyDMatrixCreate.
+ * @param ref      Reference DMatrix for providing quantile information.
+ * @param reset    Callback function resetting the iterator state.
+ * @param next     Callback function yielding the next batch of data.
+ * @param config   JSON encoded parameters for DMatrix construction.  Accepted fields are:
+ *   - missing:      Which value to represent missing value
+ *   - cache_prefix: The path of cache file, caller must initialize all the directories in this path.
+ *   - nthread (optional): Number of threads used for initializing DMatrix.
+ *   - max_bin (optional): Maximum number of bins for building histogram. Must be consistent with
+ *                         the corresponding booster training parameter.
+ *   - on_host (optional): Whether the data should be placed on host memory. Used by GPU inputs.
+ *   - min_cache_page_bytes (optional): The minimum number of bytes for each internal GPU
+ *      page. Set to 0 to disable page concatenation. Automatic configuration if the
+ *      parameter is not provided or set to None.
+ *   - max_quantile_blocks (optional): For GPU-based inputs, XGBoost handles incoming
+ *       batches with multiple growing substreams. This parameter sets the maximum number
+ *       of batches before XGBoost can cut the sub-stream and create a new one. This can
+ *       help bound the memory usage. By default, XGBoost grows new sub-streams
+ *       exponentially until batches are exhausted. Only used for the training dataset and
+ *       the default is None (unbounded).
+ * @param out The created Quantile DMatrix.
+ *
+ * @return 0 when success, -1 when failure happens
+ */
+XGB_DLL int XGExtMemQuantileDMatrixCreateFromCallback(DataIterHandle iter, DMatrixHandle proxy,
+                                                      DataIterHandle ref,
+                                                      DataIterResetCallback *reset,
+                                                      XGDMatrixCallbackNext *next,
+                                                      char const *config, DMatrixHandle *out);
 
 /*!
  * \brief Create a Device Quantile DMatrix with data iterator.

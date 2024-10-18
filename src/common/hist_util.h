@@ -84,6 +84,10 @@ class HistogramCuts {
   [[nodiscard]] bst_bin_t FeatureBins(bst_feature_t feature) const {
     return cut_ptrs_.ConstHostVector().at(feature + 1) - cut_ptrs_.ConstHostVector()[feature];
   }
+  [[nodiscard]] bst_feature_t NumFeatures() const {
+    CHECK_EQ(this->min_vals_.Size(), this->cut_ptrs_.Size() - 1);
+    return this->min_vals_.Size();
+  }
 
   std::vector<uint32_t> const& Ptrs()      const { return cut_ptrs_.ConstHostVector();   }
   std::vector<float>    const& Values()    const { return cut_values_.ConstHostVector(); }
@@ -101,8 +105,10 @@ class HistogramCuts {
     has_categorical_ = has_cat;
     max_cat_ = max_cat;
   }
-
-  [[nodiscard]] bst_bin_t TotalBins() const { return cut_ptrs_.ConstHostVector().back(); }
+  /**
+   * @brief The total number of histogram bins (excluding min values.)
+   */
+  [[nodiscard]] bst_bin_t TotalBins() const { return this->cut_values_.Size(); }
 
   // Return the index of a cut point that is strictly greater than the input
   // value, or the last available index if none exists
@@ -635,7 +641,7 @@ class ParallelGHistBuilder {
 
 // construct a histogram via histogram aggregation
 template <bool any_missing>
-void BuildHist(Span<GradientPair const> gpair, const RowSetCollection::Elem row_indices,
+void BuildHist(Span<GradientPair const> gpair, Span<bst_idx_t const> row_indices,
                const GHistIndexMatrix& gmat, GHistRow hist, bool force_read_by_column = false);
 }  // namespace common
 }  // namespace xgboost
